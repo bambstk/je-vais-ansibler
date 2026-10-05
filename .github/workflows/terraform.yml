@@ -1,0 +1,87 @@
+name: Terraform — Provision runner VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action Terraform à exécuter"
+        required: true
+        default: "plan"
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+
+permissions:
+  id-token: write      # Obligatoire pour OIDC
+  contents: read
+
+env:
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.SUBSCRIPTION_ID }}
+  TF_IN_AUTOMATION: "true"
+  TF_VAR_subscription_id: ${{ vars.SUBSCRIPTION_ID }}
+  TF_VAR_allowed_ssh_source_ip: ${{ vars.ALLOWED_SSH_SOURCE_IP }}
+  TF_VAR_admin_username: ${{ vars.ADMIN_USERNAME }}
+
+jobs:
+  terraform:
+    name: "Terraform ${{ inputs.action }}"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Plan
+        if: inputs.action == 'plan' || inputs.action == 'apply'
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        if: inputs.action == 'apply'
+        run: terraform apply -auto-approve tfplan
+
+      - name: Terraform Destroy
+        if: inputs.action == 'destroy'
+        run: terraform destroy -auto-approve
+
+      # Exporter l'IP publique et la clé SSH comme secrets GitHub
+      # pour que le workflow Ansible puisse les consommer.
+      - name: Exporter les outputs vers les secrets GitHub
+        if: inputs.action == 'apply'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_FOR_SECRETS }}
+        run: |
+          VM_IP=$(terraform output -raw vm_public_ip)
+          SSH_KEY=$(terraform output -raw ssh_private_key_pem)
+
+          gh secret set VM_PUBLIC_IP --body "$VM_IP" --repo ${{ github.repository }}
+          gh secret set VM_SSH_PRIVATE_KEY --body "$SSH_KEY" --repo ${{ github.repository }}
+
+          echo "Secrets VM_PUBLIC_IP et VM_SSH_PRIVATE_KEY mis à jour."
+
+      # Optionnel : déclencher automatiquement le workflow Ansible après l'apply
+      - name: Déclencher la configuration Ansible
+        if: inputs.action == 'apply'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_FOR_SECRETS }}
+        run: |
+          gh workflow run ansible.yml --repo ${{ github.repository }}

@@ -1,0 +1,115 @@
+name: Ansible — Configure GitHub runner
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Terraform — Provision runner VM"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.SUBSCRIPTION_ID }}
+  GITHUB_RUNNER_PAT: ${{ secrets.GITHUB_RUNNER_PAT }}
+  ANSIBLE_HOST_KEY_CHECKING: "true"
+
+jobs:
+  configure:
+    name: "Configurer le runner self-hosted"
+    runs-on: ubuntu-latest
+    # Le workflow_run se déclenche même si Terraform a échoué ; on filtre.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Checkout du repo Ansible
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ vars.ANSIBLE_REPO }}   # ex: ton-user/tp-ansible
+          token: ${{ secrets.GH_PAT_FOR_CHECKOUT }}
+          path: ansible
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.SUBSCRIPTION_ID }}
+
+      - name: Déterminer l'IP publique du runner CI
+        id: runner_ip
+        run: |
+          RUNNER_IP=$(curl -s https://api.ipify.org)
+          echo "ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
+          echo "IP publique du runner : $RUNNER_IP"
+
+      - name: Ouvrir temporairement le NSG pour l'IP du runner
+        id: nsg_rule
+        run: |
+          az network nsg rule create \
+            --resource-group "${{ vars.RESOURCE_GROUP_NAME }}" \
+            --nsg-name "${{ vars.NSG_NAME }}" \
+            --name "AllowSSH-CI-Temp" \
+            --priority 200 \
+            --direction Inbound \
+            --access Allow \
+            --protocol Tcp \
+            --source-address-prefixes "${{ steps.runner_ip.outputs.ip }}/32" \
+            --source-port-ranges "*" \
+            --destination-address-prefixes "*" \
+            --destination-port-ranges 22 \
+            --description "Règle temporaire ouverte par le pipeline CI"
+          echo "Règle NSG temporaire créée."
+
+      - name: Épingler la clé SSH de la VM dans known_hosts
+        env:
+          VM_IP: ${{ secrets.VM_PUBLIC_IP }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -H "$VM_IP" >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 644 ~/.ssh/known_hosts
+          echo "Clé SSH de la VM épinglée dans known_hosts."
+
+      - name: Écrire la clé SSH privée
+        env:
+          SSH_KEY: ${{ secrets.VM_SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      - name: Installer Ansible
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install ansible-core
+
+      - name: Écrire l'inventaire Ansible à la volée
+        env:
+          VM_IP: ${{ secrets.VM_PUBLIC_IP }}
+          ADMIN_USER: ${{ vars.ADMIN_USERNAME }}
+        run: |
+          cat > inventory.ini <<EOF
+          [runner]
+          $VM_IP ansible_user=$ADMIN_USER ansible_ssh_private_key_file=~/.ssh/id_rsa
+          EOF
+
+      - name: Exécuter le playbook Ansible
+        working-directory: ansible
+        run: |
+          ansible-playbook -i ../inventory.ini playbook.yml
+
+      - name: Fermer la règle NSG temporaire
+        if: always()
+        run: |
+          az network nsg rule delete \
+            --resource-group "${{ vars.RESOURCE_GROUP_NAME }}" \
+            --nsg-name "${{ vars.NSG_NAME }}" \
+            --name "AllowSSH-CI-Temp" \
+            --yes || echo "Règle déjà supprimée ou inexistante."
+          echo "Règle NSG temporaire supprimée."
