@@ -1,0 +1,25 @@
+---
+# Identifiants du repo GitHub cible
+github_runner_repo: "bambstk/bilan-iac-backend"
+
+# Nom du runner tel qu'il apparaîtra dans GitHub
+github_runner_name: "vm-runner"
+
+# Labels du runner (séparés par des virgules)
+github_runner_labels: "self-hosted,linux,x64"
+
+# Répertoire d'installation du runner
+github_runner_install_dir: "/home/{{ github_runner_user }}/actions-runner"
+
+# Utilisateur système qui fera tourner le runner
+github_runner_user: "azureuser"
+
+# PAT fine-grained avec la permission Administration: read/write sur le repo
+# À passer via --extra-vars ou une variable d'environnement, jamais en clair ici
+github_runner_pat: "{{ lookup('env', 'GITHUB_RUNNER_PAT') }}"
+
+# Version de Node.js LTS à installer (24.x = LTS active en 2026)
+github_runner_node_major_version: "24"
+
+# Version de l'action runner GitHub
+github_runner_version: "2.334.0"

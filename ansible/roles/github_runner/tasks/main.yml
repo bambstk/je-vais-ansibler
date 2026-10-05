@@ -1,0 +1,127 @@
+---
+# ------------------------------------------------------------------
+# 1. Paquets de base
+# ------------------------------------------------------------------
+
+- name: Mettre à jour le cache apt
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Installer les paquets de base
+  ansible.builtin.apt:
+    name:
+      - git
+      - unzip
+      - jq
+      - curl
+      - ca-certificates
+      - gnupg
+      - lsb-release
+    state: present
+
+# ------------------------------------------------------------------
+# 2. Node.js LTS via NodeSource
+# ------------------------------------------------------------------
+
+- name: Ajouter le dépôt NodeSource pour Node.js
+  ansible.builtin.shell:
+    cmd: "curl -fsSL https://deb.nodesource.com/setup_{{ github_runner_node_major_version }}.x | bash -"
+  args:
+    creates: /etc/apt/sources.list.d/nodesource.list
+  changed_when: false
+  become: true
+
+- name: Installer Node.js
+  ansible.builtin.apt:
+    name: nodejs
+    state: present
+    update_cache: true
+
+# ------------------------------------------------------------------
+# 3. Récupérer un token d'enregistrement frais
+# ------------------------------------------------------------------
+
+- name: Obtenir un token d'enregistrement GitHub
+  ansible.builtin.uri:
+    url: "https://api.github.com/repos/{{ github_runner_repo }}/actions/runners/registration-token"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ github_runner_pat }}"
+      Accept: "application/vnd.github+json"
+    status_code: 201
+  register: github_runner_token_response
+  changed_when: false
+  no_log: true
+
+# ------------------------------------------------------------------
+# 4. Télécharger et extraire le runner
+# ------------------------------------------------------------------
+
+- name: Créer le répertoire d'installation du runner
+  ansible.builtin.file:
+    path: "{{ github_runner_install_dir }}"
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: "0755"
+
+- name: Télécharger l'archive du runner
+  ansible.builtin.get_url:
+    url: "https://github.com/actions/runner/releases/download/v{{ github_runner_version }}/actions-runner-linux-x64-{{ github_runner_version }}.tar.gz"
+    dest: "/tmp/actions-runner-{{ github_runner_version }}.tar.gz"
+    mode: "0644"
+  register: github_runner_download
+
+- name: Extraire l'archive du runner
+  ansible.builtin.unarchive:
+    src: "/tmp/actions-runner-{{ github_runner_version }}.tar.gz"
+    dest: "{{ github_runner_install_dir }}"
+    remote_src: true
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+  when: github_runner_download.changed
+
+# ------------------------------------------------------------------
+# 5. Configurer le runner
+# ------------------------------------------------------------------
+
+- name: Vérifier si le runner est déjà configuré
+  ansible.builtin.stat:
+    path: "{{ github_runner_install_dir }}/.runner"
+  register: github_runner_config_file
+
+- name: Configurer le runner
+  ansible.builtin.command:
+    cmd: >
+      ./config.sh
+      --url https://github.com/{{ github_runner_repo }}
+      --token {{ github_runner_token_response.json.token }}
+      --name {{ github_runner_name }}
+      --labels {{ github_runner_labels }}
+      --unattended
+      --replace
+    chdir: "{{ github_runner_install_dir }}"
+  become: true
+  become_user: "{{ github_runner_user }}"
+  when: not github_runner_config_file.stat.exists
+  changed_when: true
+
+# ------------------------------------------------------------------
+# 6. Installer et démarrer le service
+# ------------------------------------------------------------------
+
+- name: Installer le service systemd
+  ansible.builtin.command:
+    cmd: ./svc.sh install {{ github_runner_user }}
+    chdir: "{{ github_runner_install_dir }}"
+  args:
+    creates: "/etc/systemd/system/actions.runner.{{ github_runner_repo | replace('/', '-') }}.{{ github_runner_name }}.service"
+  changed_when: true
+
+- name: Démarrer le service
+  ansible.builtin.command:
+    cmd: ./svc.sh start
+    chdir: "{{ github_runner_install_dir }}"
+  changed_when: true
+  notify: Vérifier le statut du runner

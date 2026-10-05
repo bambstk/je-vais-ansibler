@@ -1,0 +1,6 @@
+---
+- name: Configurer la VM en runner GitHub Actions self-hosted
+  hosts: all
+  become: true
+  roles:
+    - github_runner

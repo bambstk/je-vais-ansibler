@@ -1,0 +1,8 @@
+---
+- name: Vérifier le statut du runner
+  ansible.builtin.command:
+    cmd: ./svc.sh status
+    chdir: "{{ github_runner_install_dir }}"
+  changed_when: false
+  register: github_runner_status
+  failed_when: "'active (running)' not in github_runner_status.stdout"
